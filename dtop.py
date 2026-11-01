@@ -20,6 +20,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+__version__ = "1.0.0"
+
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
@@ -1087,6 +1089,11 @@ def render_snapshot(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="dtop - A btop-style terminal SSD & disk storage monitor."
+    )
+    parser.add_argument(
+        "-v", "--version",
+        action="version",
+        version=f"dtop {__version__}",
     )
     parser.add_argument(
         "-a", "--all",
