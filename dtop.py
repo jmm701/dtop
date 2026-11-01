@@ -786,94 +786,35 @@ class DtopApp:
 
     def draw(self, stdscr: "curses._CursesWindow") -> None:
         h, w = stdscr.getmaxyx()
-        if h < 14 or w < 50:
-            safe_addstr(stdscr, 0, 0, f"Terminal too small ({w}x{h}). Resize to at least 50x14.", curses.A_BOLD)
+        if h < 10 or w < 50:
+            safe_addstr(stdscr, 0, 0, f"Terminal too small ({w}x{h}). Resize to at least 50x10.", curses.A_BOLD)
             return
 
-        # 1. Header / Summary Box (height 4)
-        self.draw_header(stdscr, 0, 0, 4, w)
-
-        # Body area: between y=4 and y=h-1 (bottom keybar)
-        body_y = 4
-        body_h = h - 5
+        body_h = h - 1  # leaves 1 row for bottom footer
 
         # Split layout if terminal is wide (w >= 100), stacked if narrower
         if w >= 100:
             left_w = int(w * 0.55)
             right_w = w - left_w
-            self.draw_disks_box(stdscr, body_y, 0, body_h, left_w)
-            self.draw_io_box(stdscr, body_y, left_w, body_h, right_w)
+            self.draw_disks_box(stdscr, 0, 0, body_h, left_w)
+            self.draw_io_box(stdscr, 0, left_w, body_h, right_w)
         else:
             # Stacked: Disks on top, IO Activity below
-            disks_h = min(body_h - 7, max(8, len(self.mounts) * 4 + 3))
+            disks_h = min(body_h - 6, max(7, len(self.mounts) * 4 + 4))
             io_h = body_h - disks_h
-            self.draw_disks_box(stdscr, body_y, 0, disks_h, w)
-            self.draw_io_box(stdscr, body_y + disks_h, 0, io_h, w)
+            self.draw_disks_box(stdscr, 0, 0, disks_h, w)
+            self.draw_io_box(stdscr, disks_h, 0, io_h, w)
 
         # Bottom shortcut bar
         self.draw_footer(stdscr, h - 1, w)
-
-        # Bottom shortcut bar
-        self.draw_footer(stdscr, h - 1, w)
-
-    def draw_header(self, stdscr: "curses._CursesWindow", y: int, x: int, h: int, w: int) -> None:
-        clock_str = time.strftime("%H:%M:%S")
-        draw_btop_box(
-            stdscr, y, x, h, w,
-            title="dtop ── SSD & Disk Storage Monitor",
-            right_label=f"↻ {self.refresh_interval:.1f}s │ {clock_str}",
-            rounded=self.theme.rounded_corners,
-        )
-
-        # Primary root disk or aggregate non-virtual SSD metrics
-        primary = next((m for m in self.mounts if m.mountpoint == "/"), self.mounts[0] if self.mounts else None)
-        total_read_bps = sum(
-            m.read_bps for name, m in self.io_tracker.metrics.items()
-            if not any( c.isdigit() for c in name ) or name.startswith("zram")
-        )
-        total_write_bps = sum(
-            m.write_bps for name, m in self.io_tracker.metrics.items()
-            if not any( c.isdigit() for c in name ) or name.startswith("zram")
-        )
-
-        if primary:
-            # Row 1: Primary Root SSD Used / Free summary
-            badge = "SSD" if primary.is_ssd else "DISK"
-            badge_lbl = f"[{badge} {primary.display_name} ({primary.fstype})]"
-            safe_addstr(stdscr, y + 1, x + 2, badge_lbl, curses.color_pair(C_BADGE) | curses.A_BOLD)
-            info_str = (
-                f" Used: {fmt_bytes(primary.used)} ({primary.used_pct:.1f}%)  │  "
-                f"Free: {fmt_bytes(primary.free)} ({primary.free_pct:.1f}%)  │  "
-                f"Total: {fmt_bytes(primary.total)}"
-            )
-            safe_addstr(stdscr, y + 1, x + 3 + len(badge_lbl), info_str, curses.color_pair(C_TITLE))
-
-            # Row 2: Full-width btop gauge bar for Primary SSD + Swap & I/O summary
-            bar_w = max(12, min(40, w - 58))
-            bar = make_bar(primary.used_pct, bar_w)
-            safe_addstr(stdscr, y + 2, x + 2, "Used ", curses.color_pair(C_DIM))
-            safe_addstr(stdscr, y + 2, x + 7, bar, color_for_pct(primary.used_pct))
-            safe_addstr(stdscr, y + 2, x + 8 + bar_w, f"{primary.used_pct:5.1f}%", curses.color_pair(C_TITLE) | curses.A_BOLD)
-
-            # Right side of row 2: Live Read / Write + Swap
-            rw_x = x + 16 + bar_w
-            if rw_x + 30 < w:
-                safe_addstr(stdscr, y + 2, rw_x, f"▲ Read: {fmt_rate(total_read_bps):>10}", curses.color_pair(C_IO_READ))
-                safe_addstr(stdscr, y + 2, rw_x + 20, f"▼ Write: {fmt_rate(total_write_bps):>10}", curses.color_pair(C_IO_WRITE))
-                if self.swaps and rw_x + 56 < w:
-                    sw = self.swaps[0]
-                    safe_addstr(
-                        stdscr, y + 2, rw_x + 42,
-                        f"│ Swap: {fmt_bytes(sw.used)}/{fmt_bytes(sw.total)} ({sw.used_pct:.0f}%)",
-                        curses.color_pair(C_DIM),
-                    )
 
     def draw_disks_box(self, stdscr: "curses._CursesWindow", y: int, x: int, h: int, w: int) -> None:
-        mode_lbl = "all mounts [a]" if self.include_all_mounts else "physical/main [a]"
+        clock_str = time.strftime("%H:%M:%S")
+        mode_lbl = "all [a]" if self.include_all_mounts else "physical [a]"
         draw_btop_box(
             stdscr, y, x, h, w,
-            title="disks",
-            right_label=mode_lbl,
+            title="dtop ── disks",
+            right_label=f"{mode_lbl} │ ↻ {self.refresh_interval:.1f}s │ {clock_str}",
             active=True,
             rounded=self.theme.rounded_corners,
         )
@@ -947,6 +888,17 @@ class DtopApp:
             if row_y < max_y and idx < len(self.mounts) - 1:
                 safe_addstr(stdscr, row_y, x + 2, "─" * inner_w, curses.color_pair(C_BORDER))
                 row_y += 1
+
+        # Show Swap at bottom of disks box if space allows
+        if self.swaps and row_y < max_y:
+            safe_addstr(stdscr, row_y, x + 2, "─" * inner_w, curses.color_pair(C_BORDER))
+            row_y += 1
+            if row_y < max_y:
+                sw = self.swaps[0]
+                sw_tag = f"[Swap {os.path.basename(sw.device)}]"
+                safe_addstr(stdscr, row_y, x + 2, sw_tag, curses.color_pair(C_BADGE))
+                sw_info = f"Used: {fmt_bytes(sw.used)} / {fmt_bytes(sw.total)} ({sw.used_pct:.1f}%)   │   Free: {fmt_bytes(sw.free)}"
+                safe_addstr(stdscr, row_y, x + 3 + len(sw_tag), sw_info, curses.color_pair(C_TITLE))
 
     def draw_io_box(self, stdscr: "curses._CursesWindow", y: int, x: int, h: int, w: int) -> None:
         # Show I/O for selected disk's block device or primary block device (e.g. vda2 / vda)
