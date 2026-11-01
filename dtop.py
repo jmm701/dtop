@@ -4,9 +4,8 @@ dtop - A btop-inspired terminal disk & SSD storage monitor.
 
 Features:
 - Btop-style rounded Unicode boxes, color gradients, and dual Used/Free gauges
-- Smart deduplication of Btrfs subvolumes & virtual mounts (toggleable with 'a')
+- Focused monitoring: Linux VM virtual disk and host Computer SSD
 - Real-time disk I/O read/write throughput, IOPS, TRIM/discard stats & sparklines
-- Non-blocking interactive directory space analyzer (drill down with Enter/Right)
 - Snapshot mode (`--once`) for instant terminal output without entering fullscreen TUI
 """
 
@@ -15,9 +14,7 @@ from __future__ import annotations
 import argparse
 import curses
 import os
-import stat
 import sys
-import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -422,139 +419,7 @@ class IOTracker:
         return self.metrics
 
 
-# ---------------------------------------------------------------------------
-# Background Directory Space Scanner
-# ---------------------------------------------------------------------------
 
-@dataclass
-class DirEntry:
-    name: str
-    path: str
-    size: int
-    is_dir: bool
-    pct_of_parent: float = 0.0
-
-
-class DirectoryScanner:
-    """Asynchronous directory space scanner with caching so the TUI stays fast."""
-
-    def __init__(self, initial_path: str) -> None:
-        self.current_path = os.path.abspath(initial_path)
-        self.cache: Dict[str, Tuple[List[DirEntry], int, bool]] = {}
-        self.lock = threading.Lock()
-        self._active_scan_path: Optional[str] = None
-        self._scan_id = 0
-        self.trigger_scan(self.current_path)
-
-    def trigger_scan(self, path: str, force: bool = False) -> None:
-        path = os.path.abspath(path)
-        with self.lock:
-            self.current_path = path
-            if not force and path in self.cache and self.cache[path][2]:
-                return
-            self._scan_id += 1
-            scan_id = self._scan_id
-            self._active_scan_path = path
-
-        t = threading.Thread(
-            target=self._scan_worker,
-            args=(path, scan_id),
-            daemon=True,
-        )
-        t.start()
-
-    def _dir_size_bounded(self, root: str, root_dev: int, max_entries: int = 25000) -> int:
-        total = 0
-        seen_inodes = set()
-        stack = [root]
-        count = 0
-        while stack and count < max_entries:
-            cur = stack.pop()
-            try:
-                with os.scandir(cur) as it:
-                    for entry in it:
-                        count += 1
-                        if count >= max_entries:
-                            break
-                        try:
-                            st = entry.stat(follow_symlinks=False)
-                        except OSError:
-                            continue
-                        if st.st_dev != root_dev:
-                            continue
-                        if stat.S_ISREG(st.st_mode):
-                            if st.st_nlink > 1:
-                                key = (st.st_dev, st.st_ino)
-                                if key in seen_inodes:
-                                    continue
-                                seen_inodes.add(key)
-                            total += st.st_blocks * 512 if hasattr(st, "st_blocks") and st.st_blocks else st.st_size
-                        elif stat.S_ISDIR(st.st_mode) and not entry.is_symlink():
-                            stack.append(entry.path)
-            except OSError:
-                continue
-        return total
-
-    def _scan_worker(self, path: str, scan_id: int) -> None:
-        try:
-            root_st = os.stat(path, follow_symlinks=False)
-            root_dev = root_st.st_dev
-        except OSError:
-            with self.lock:
-                self.cache[path] = ([], 0, True)
-            return
-
-        entries: List[DirEntry] = []
-        try:
-            children = list(os.scandir(path))
-        except OSError:
-            with self.lock:
-                self.cache[path] = ([], 0, True)
-            return
-
-        running_total = 0
-        for child in children:
-            if path == "/" and child.name in ("dev", "proc", "sys"):
-                continue
-            with self.lock:
-                if scan_id != self._scan_id:
-                    return
-            try:
-                st = child.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            is_dir = stat.S_ISDIR(st.st_mode) and not child.is_symlink()
-            if is_dir:
-                if st.st_dev != root_dev:
-                    size = 0
-                else:
-                    size = self._dir_size_bounded(child.path, root_dev)
-            else:
-                size = st.st_blocks * 512 if hasattr(st, "st_blocks") and st.st_blocks else st.st_size
-
-            running_total += size
-            entries.append(DirEntry(name=child.name, path=child.path, size=size, is_dir=is_dir))
-
-            # Publish incremental progress
-            sorted_partial = sorted(entries, key=lambda e: e.size, reverse=True)
-            denom = max(1, running_total)
-            for e in sorted_partial:
-                e.pct_of_parent = (e.size / denom) * 100.0
-            with self.lock:
-                self.cache[path] = (sorted_partial, running_total, False)
-
-        entries.sort(key=lambda e: e.size, reverse=True)
-        denom = max(1, running_total)
-        for e in entries:
-            e.pct_of_parent = (e.size / denom) * 100.0
-        with self.lock:
-            self.cache[path] = (entries, running_total, True)
-
-    def get_state(self) -> Tuple[str, List[DirEntry], int, bool]:
-        with self.lock:
-            path = self.current_path
-            entries, total, done = self.cache.get(path, ([], 0, False))
-            return path, list(entries), total, done
 
 
 # ---------------------------------------------------------------------------
@@ -864,19 +729,14 @@ def draw_btop_box(
 
 
 class DtopApp:
-    def __init__(self, initial_dir: Optional[str] = None, theme: Optional[BtopTheme] = None) -> None:
+    def __init__(self, theme: Optional[BtopTheme] = None) -> None:
         self.theme = theme or load_btop_theme()
         self.include_all_mounts = False
-        self.active_pane = 0  # 0 = disks list, 1 = directory explorer
         self.selected_disk_idx = 0
-        self.selected_dir_idx = 0
-        self.dir_scroll = 0
         self.refresh_interval = 1.0
         self.io_tracker = IOTracker()
         self.mounts = get_mounts(self.include_all_mounts)
         self.swaps = get_swap_info()
-        start_dir = initial_dir or os.path.expanduser("~")
-        self.scanner = DirectoryScanner(start_dir)
         self.last_update = time.monotonic()
 
     def refresh_metrics(self) -> None:
@@ -915,54 +775,14 @@ class DtopApp:
                 self.refresh_metrics()
             elif ch in (ord("r"), ord("R")):
                 self.refresh_metrics()
-                self.scanner.trigger_scan(self.scanner.current_path, force=True)
-            elif ch == ord("\t"):
-                self.active_pane = 1 - self.active_pane
-            elif ch in (ord("s"), ord("S")):
-                if self.mounts:
-                    mnt = self.mounts[self.selected_disk_idx].mountpoint
-                    self.scanner.trigger_scan(mnt)
-                    self.selected_dir_idx = 0
-                    self.dir_scroll = 0
-                    self.active_pane = 1
             elif ch in (ord("+"), ord("=")):
                 self.refresh_interval = max(0.25, self.refresh_interval - 0.25)
             elif ch in (ord("-"), ord("_")):
                 self.refresh_interval = min(5.0, self.refresh_interval + 0.25)
             elif ch in (curses.KEY_UP, ord("k")):
-                if self.active_pane == 0:
-                    self.selected_disk_idx = max(0, self.selected_disk_idx - 1)
-                else:
-                    self.selected_dir_idx = max(0, self.selected_dir_idx - 1)
+                self.selected_disk_idx = max(0, self.selected_disk_idx - 1)
             elif ch in (curses.KEY_DOWN, ord("j")):
-                if self.active_pane == 0:
-                    self.selected_disk_idx = min(max(0, len(self.mounts) - 1), self.selected_disk_idx + 1)
-                else:
-                    _, entries, _, _ = self.scanner.get_state()
-                    self.selected_dir_idx = min(max(0, len(entries) - 1), self.selected_dir_idx + 1)
-            elif ch in (curses.KEY_RIGHT, ord("\n"), curses.KEY_ENTER, ord("l")):
-                if self.active_pane == 0 and self.mounts:
-                    mnt = self.mounts[self.selected_disk_idx].mountpoint
-                    self.scanner.trigger_scan(mnt)
-                    self.selected_dir_idx = 0
-                    self.dir_scroll = 0
-                    self.active_pane = 1
-                elif self.active_pane == 1:
-                    _, entries, _, _ = self.scanner.get_state()
-                    if 0 <= self.selected_dir_idx < len(entries):
-                        target = entries[self.selected_dir_idx]
-                        if target.is_dir:
-                            self.scanner.trigger_scan(target.path)
-                            self.selected_dir_idx = 0
-                            self.dir_scroll = 0
-            elif ch in (curses.KEY_LEFT, curses.KEY_BACKSPACE, 127, ord("h")):
-                if self.active_pane == 1:
-                    cur_path, _, _, _ = self.scanner.get_state()
-                    parent = os.path.dirname(cur_path.rstrip("/")) or "/"
-                    if parent != cur_path:
-                        self.scanner.trigger_scan(parent)
-                        self.selected_dir_idx = 0
-                        self.dir_scroll = 0
+                self.selected_disk_idx = min(max(0, len(self.mounts) - 1), self.selected_disk_idx + 1)
 
     def draw(self, stdscr: "curses._CursesWindow") -> None:
         h, w = stdscr.getmaxyx()
@@ -977,23 +797,21 @@ class DtopApp:
         body_y = 4
         body_h = h - 5
 
-        # Split layout: Left = Disks & I/O, Right = Directory Explorer (or stacked if narrow)
+        # Split layout if terminal is wide (w >= 100), stacked if narrower
         if w >= 100:
-            left_w = int(w * 0.56)
+            left_w = int(w * 0.55)
             right_w = w - left_w
-            io_h = min(10, max(7, body_h // 3))
-            disks_h = body_h - io_h
-
-            self.draw_disks_box(stdscr, body_y, 0, disks_h, left_w)
-            self.draw_io_box(stdscr, body_y + disks_h, 0, io_h, left_w)
-            self.draw_explorer_box(stdscr, body_y, left_w, body_h, right_w)
+            self.draw_disks_box(stdscr, body_y, 0, body_h, left_w)
+            self.draw_io_box(stdscr, body_y, left_w, body_h, right_w)
         else:
-            io_h = 7
-            explorer_h = max(7, body_h // 3)
-            disks_h = body_h - io_h - explorer_h
+            # Stacked: Disks on top, IO Activity below
+            disks_h = min(body_h - 7, max(8, len(self.mounts) * 4 + 3))
+            io_h = body_h - disks_h
             self.draw_disks_box(stdscr, body_y, 0, disks_h, w)
             self.draw_io_box(stdscr, body_y + disks_h, 0, io_h, w)
-            self.draw_explorer_box(stdscr, body_y + disks_h + io_h, 0, explorer_h, w)
+
+        # Bottom shortcut bar
+        self.draw_footer(stdscr, h - 1, w)
 
         # Bottom shortcut bar
         self.draw_footer(stdscr, h - 1, w)
@@ -1056,7 +874,7 @@ class DtopApp:
             stdscr, y, x, h, w,
             title="disks",
             right_label=mode_lbl,
-            active=(self.active_pane == 0),
+            active=True,
             rounded=self.theme.rounded_corners,
         )
 
@@ -1202,65 +1020,11 @@ class DtopApp:
             safe_addstr(stdscr, row, x + 2, line[:inner_w], curses.color_pair(C_DIM))
             row += 1
 
-    def draw_explorer_box(self, stdscr: "curses._CursesWindow", y: int, x: int, h: int, w: int) -> None:
-        path, entries, total_size, done = self.scanner.get_state()
-        status = f"{fmt_bytes(total_size)}" if done else f"scanning… {fmt_bytes(total_size)}"
-        draw_btop_box(
-            stdscr, y, x, h, w,
-            title="space analyzer",
-            right_label=status,
-            active=(self.active_pane == 1),
-            rounded=self.theme.rounded_corners,
-        )
-
-        inner_w = w - 4
-        # Path header
-        safe_addstr(stdscr, y + 1, x + 2, f"▸ {path}"[:inner_w], curses.color_pair(C_BADGE) | curses.A_BOLD)
-        safe_addstr(stdscr, y + 2, x + 2, "─" * inner_w, curses.color_pair(C_BORDER))
-
-        list_y = y + 3
-        list_h = max(1, h - 4)
-
-        if not entries:
-            msg = "Scanning directory contents..." if not done else "Directory is empty or inaccessible."
-            safe_addstr(stdscr, list_y, x + 2, msg, curses.color_pair(C_DIM))
-            return
-
-        if self.selected_dir_idx >= len(entries):
-            self.selected_dir_idx = max(0, len(entries) - 1)
-        if self.selected_dir_idx < self.dir_scroll:
-            self.dir_scroll = self.selected_dir_idx
-        elif self.selected_dir_idx >= self.dir_scroll + list_h:
-            self.dir_scroll = self.selected_dir_idx - list_h + 1
-
-        visible = entries[self.dir_scroll : self.dir_scroll + list_h]
-        bar_w = max(6, min(14, inner_w // 4))
-        name_w = max(10, inner_w - bar_w - 22)
-
-        for i, entry in enumerate(visible):
-            abs_idx = self.dir_scroll + i
-            ry = list_y + i
-            is_sel = (abs_idx == self.selected_dir_idx and self.active_pane == 1)
-
-            icon = "▸/" if (is_sel and entry.is_dir) else (" /" if entry.is_dir else "  ")
-            disp_name = (entry.name[: name_w - 1] + "…") if len(entry.name) > name_w else entry.name
-            bar = make_bar(entry.pct_of_parent, bar_w)
-            size_str = f"{fmt_bytes(entry.size):>9} {entry.pct_of_parent:5.1f}%"
-
-            row_attr = curses.color_pair(C_SELECTED) | curses.A_BOLD if is_sel else curses.color_pair(C_DEFAULT)
-            safe_addstr(stdscr, ry, x + 2, f"{icon}{disp_name:<{name_w}}", row_attr)
-            safe_addstr(stdscr, ry, x + 4 + name_w, bar, color_for_pct(entry.pct_of_parent))
-            safe_addstr(stdscr, ry, x + 5 + name_w + bar_w, size_str, row_attr)
-
     def draw_footer(self, stdscr: "curses._CursesWindow", y: int, w: int) -> None:
         keys = [
-            ("Tab", "Switch Pane"),
-            ("↑/↓", "Select"),
-            ("Enter/→", "Drill In"),
-            ("Bksp/←", "Up Dir"),
-            ("s", "Scan Mount"),
-            ("a", "All Mounts"),
+            ("↑/↓", "Select Disk"),
             ("r", "Refresh"),
+            ("a", "All Mounts"),
             ("+/-", "Speed"),
             ("q", "Quit"),
         ]
@@ -1280,7 +1044,6 @@ class DtopApp:
 
 def render_snapshot(
     include_all: bool = False,
-    scan_path: Optional[str] = None,
     theme: Optional[BtopTheme] = None,
 ) -> None:
     """Print a colored btop-style storage summary directly to stdout."""
@@ -1366,41 +1129,12 @@ def render_snapshot(
         )
         print(pad_row(len(sw_plain), sw_colored))
 
-    if scan_path:
-        scanner = DirectoryScanner(scan_path)
-        for _ in range(50):
-            _, entries, total_sz, done = scanner.get_state()
-            if done:
-                break
-            time.sleep(0.05)
-        _, entries, total_sz, _ = scanner.get_state()
-        sec_title = f"Top Directories in {os.path.abspath(scan_path)} ({fmt_bytes(total_sz)})"
-        sec_dashes = max(1, width - len(sec_title) - 7)
-        print(f"{BORDER}{ml}─┤ {RST}{TITLE}{BOLD}{sec_title}{RST}{BORDER} ├{'─' * sec_dashes}{mr}{RST}")
-        for e in entries[:8]:
-            bar = make_bar(e.pct_of_parent, 22)
-            col = ansi_pct_color(e.pct_of_parent)
-            tag = "[DIR]" if e.is_dir else "[FILE]"
-            name_disp = (e.name[:23] + "…") if len(e.name) > 24 else e.name
-            plain_line = f"{tag:<6} {name_disp:<24} {bar} {fmt_bytes(e.size):>10} ({e.pct_of_parent:5.1f}%)"
-            colored_line = (
-                f"{BADGE if e.is_dir else DIM}{tag:<6}{RST} {MAIN}{name_disp:<24}{RST} "
-                f"{col}{bar}{RST} {MAIN}{BOLD}{fmt_bytes(e.size):>10}{RST} ({e.pct_of_parent:5.1f}%)"
-            )
-            print(pad_row(len(plain_line), colored_line))
-
     print(f"{BORDER}{bl}{'─' * (width - 2)}{br}{RST}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="dtop - A btop-style terminal SSD & disk storage monitor."
-    )
-    parser.add_argument(
-        "path",
-        nargs="?",
-        default=os.path.expanduser("~"),
-        help="Initial directory path to analyze in the space explorer (default: ~)",
     )
     parser.add_argument(
         "-a", "--all",
@@ -1422,10 +1156,10 @@ def main() -> int:
     theme = load_btop_theme(args.theme)
 
     if args.once or not sys.stdout.isatty():
-        render_snapshot(include_all=args.all, scan_path=args.path, theme=theme)
+        render_snapshot(include_all=args.all, theme=theme)
         return 0
 
-    app = DtopApp(initial_dir=args.path, theme=theme)
+    app = DtopApp(theme=theme)
     app.include_all_mounts = args.all
     app.refresh_metrics()
     try:

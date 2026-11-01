@@ -1,8 +1,10 @@
 # dtop 💽
 
-A **btop-inspired** terminal disk & SSD storage monitor with real-time I/O throughput, non-blocking space exploration, and native theme compatibility.
+A **btop-inspired** terminal disk & SSD storage monitor with real-time I/O throughput and native theme compatibility.
 
-Written in **100% pure Python 3** using only standard library modules (`curses`, `threading`). Zero external pip dependencies required.
+Focused directly on your core storage: **Linux VM disk** and **Computer SSD**, with zero bloat.
+
+Written in **100% pure Python 3** using only standard library modules (`curses`). Zero external pip dependencies required.
 
 ---
 
@@ -10,9 +12,9 @@ Written in **100% pure Python 3** using only standard library modules (`curses`,
 
 - **btop Aesthetics**: Beautiful rounded Unicode boxes, dual Used/Free visual gauges, and smooth color gradients.
 - **Native btop Theme Support**: Automatically detects and loads your active `btop` theme from `~/.config/btop/btop.conf` or custom `.theme` files.
-- **Smart Mount Filtering**: Intelligently deduplicates Btrfs subvolumes, loop devices, and virtual/tmpfs pseudo-filesystems (toggleable on the fly).
+- **Focused Storage View**: Displays your **Linux VM disk (`/`)** and **Computer SSD (`/mnt/mac`)**, keeping the interface clean and clutter-free.
+- **Smart Filtering**: Automatically hides virtual filesystem trees (`/dev`, `/proc`, `/sys`) and boot partitions.
 - **Real-time I/O & Throughput**: Displays live read/write speeds, IOPS, discard/TRIM activity, and sparkline activity graphs.
-- **Interactive Directory Space Explorer**: Non-blocking background thread scanner for interactive folder drill-down without freezing the TUI.
 - **Snapshot Mode (`--once` / `-1`)**: Instantly prints a styled storage overview directly to your terminal without launching the fullscreen curses interface.
 
 ---
@@ -44,14 +46,10 @@ cd dtop
 
 | Key | Action |
 |---|---|
-| `Tab` | Switch active focus between **Disks** and **Directory Explorer** |
-| `↑` / `k` | Navigate selection up |
-| `↓` / `j` | Navigate selection down |
-| `→` / `Enter` / `l` | Drill down into selected directory (or inspect selected mount) |
-| `←` / `Backspace` / `h` | Go up to parent directory |
-| `a` | Toggle all mounts (include virtual/tmpfs and duplicate subvolumes) |
-| `s` | Scan the selected mount in the directory analyzer |
-| `r` | Refresh disk metrics and force directory rescan |
+| `↑` / `k` | Select previous disk |
+| `↓` / `j` | Select next disk |
+| `r` | Refresh disk and I/O metrics |
+| `a` | Toggle all mounts |
 | `+` / `=` | Decrease refresh interval (faster updates) |
 | `-` / `_` | Increase refresh interval (slower updates) |
 | `q` / `Esc` | Quit `dtop` |
@@ -61,12 +59,9 @@ cd dtop
 ## 🛠️ Command-Line Options
 
 ```text
-usage: dtop.py [-h] [-a] [-1] [-t THEME] [path]
+usage: dtop.py [-h] [-a] [-1] [-t THEME]
 
 dtop - A btop-style terminal SSD & disk storage monitor.
-
-positional arguments:
-  path               Initial directory path to analyze in the space explorer (default: ~)
 
 options:
   -h, --help         show this help message and exit
@@ -77,9 +72,9 @@ options:
 
 ### Examples
 
-Launch analyzer on root filesystem:
+Launch live interactive monitor:
 ```bash
-dtop /
+dtop
 ```
 
 Print a one-time snapshot:
