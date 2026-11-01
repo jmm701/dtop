@@ -127,6 +127,14 @@ class MountDisk:
     submounts: List[str] = field(default_factory=list)
     block_dev: str = ""
 
+    @property
+    def display_name(self) -> str:
+        if self.mountpoint == "/":
+            return "Linux VM (/)"
+        elif self.mountpoint == "/mnt/mac" or self.fstype in ("9p", "virtiofs", "vboxsf"):
+            return f"Computer SSD ({self.mountpoint})"
+        return self.mountpoint
+
 
 @dataclass
 class DiskIOState:
@@ -233,12 +241,17 @@ def get_mounts(include_all: bool = False) -> List[MountDisk]:
     results: List[MountDisk] = []
 
     for dev, mnt, fstype, opts in raw_entries:
+        # Never show /dev or /dev/* mountpoints as storage disks
+        if mnt == "/dev" or mnt.startswith("/dev/"):
+            continue
+
         is_virt = (
             fstype in VIRTUAL_FSTYPES
             or fstype == "tmpfs"
-            or mnt.startswith(("/proc", "/sys", "/dev", "/run/credentials", "/run/user"))
+            or mnt.startswith(("/proc", "/sys", "/run/credentials", "/run/user"))
         )
-        if not include_all and is_virt:
+        is_boot = mnt == "/boot" or mnt.startswith(("/boot/", "/efi"))
+        if not include_all and (is_virt or is_boot):
             continue
 
         try:
@@ -501,6 +514,8 @@ class DirectoryScanner:
 
         running_total = 0
         for child in children:
+            if path == "/" and child.name in ("dev", "proc", "sys"):
+                continue
             with self.lock:
                 if scan_id != self._scan_id:
                     return
@@ -1006,13 +1021,14 @@ class DtopApp:
         if primary:
             # Row 1: Primary Root SSD Used / Free summary
             badge = "SSD" if primary.is_ssd else "DISK"
-            safe_addstr(stdscr, y + 1, x + 2, f"[{badge} {primary.mountpoint} ({primary.fstype})]", curses.color_pair(C_BADGE) | curses.A_BOLD)
+            badge_lbl = f"[{badge} {primary.display_name} ({primary.fstype})]"
+            safe_addstr(stdscr, y + 1, x + 2, badge_lbl, curses.color_pair(C_BADGE) | curses.A_BOLD)
             info_str = (
                 f" Used: {fmt_bytes(primary.used)} ({primary.used_pct:.1f}%)  │  "
                 f"Free: {fmt_bytes(primary.free)} ({primary.free_pct:.1f}%)  │  "
                 f"Total: {fmt_bytes(primary.total)}"
             )
-            safe_addstr(stdscr, y + 1, x + 20, info_str, curses.color_pair(C_TITLE))
+            safe_addstr(stdscr, y + 1, x + 3 + len(badge_lbl), info_str, curses.color_pair(C_TITLE))
 
             # Row 2: Full-width btop gauge bar for Primary SSD + Swap & I/O summary
             bar_w = max(12, min(40, w - 58))
@@ -1060,7 +1076,7 @@ class DtopApp:
             # Line 1: Mountpoint, Device, FSType, SSD tag, Total Size
             ssd_tag = "SSD" if m.is_ssd else ("TMP" if m.is_virtual else "HDD")
             dev_short = os.path.basename(m.device) if m.device.startswith("/dev/") else m.device
-            header_left = f"▸ {m.mountpoint}" if is_sel else f"  {m.mountpoint}"
+            header_left = f"▸ {m.display_name}" if is_sel else f"  {m.display_name}"
             meta = f"[{dev_short} · {m.fstype} · {ssd_tag}]"
             tot_lbl = f"Total: {fmt_bytes(m.total)}"
 
@@ -1307,11 +1323,12 @@ def render_snapshot(
     for idx, m in enumerate(mounts):
         ssd_tag = "SSD" if m.is_ssd else ("TMP" if m.is_virtual else "DISK")
         dev_short = os.path.basename(m.device) if m.device.startswith("/dev/") else m.device
-        left_plain = f"{m.mountpoint:<12} [{dev_short} · {m.fstype} · {ssd_tag}]"
+        disp_name = m.display_name
+        left_plain = f"{disp_name:<25} [{dev_short} · {m.fstype} · {ssd_tag}]"
         right_plain = f"Total: {fmt_bytes(m.total)}"
         gap = max(1, inner - len(left_plain) - len(right_plain))
         row_str = (
-            f"{TITLE}{BOLD}{m.mountpoint:<12}{RST} {BADGE}[{dev_short} · {m.fstype} · {ssd_tag}]{RST}"
+            f"{TITLE}{BOLD}{disp_name:<25}{RST} {BADGE}[{dev_short} · {m.fstype} · {ssd_tag}]{RST}"
             f"{' ' * gap}Total: {MAIN}{BOLD}{fmt_bytes(m.total)}{RST}"
         )
         print(pad_row(len(left_plain) + gap + len(right_plain), row_str))
